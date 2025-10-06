@@ -45,4 +45,71 @@ int RunSphereCubicReprojecter(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
+int RunSphereStereoExporter(int argc, char** argv) {
+  std::string input_path;
+  std::string output_path;
+
+  // 逗号分隔：可一次跑多组基线间隔（例如 "3,10,30"）
+  std::string baseline_intervals = "10";
+
+  // 环角（单位度），在“垂直于运动方向的环”上的等分角度
+  std::string ring_degrees = "0,60,120,180,240,300";
+
+  // 目标针孔相机规格（与 ExportPerspectiveCubic 的 image_size/field_of_view 类似）
+  int image_size = 0;                 // <=0 则按 ERP 高度/2
+  double field_of_view = 75.0;        // 目标针孔水平 FOV（度）
+
+  // 世界“上”向量（有 IMU 用重力方向；否则用 0,1,0）
+  std::string world_up = "0,1,0";
+
+  // 过短基线剔除阈值（米）
+  double min_baseline_m = 0.05;
+
+  OptionManager options;
+  options.AddImageOptions();  // 提供 --image_path
+  options.AddRequiredOption("input_path", &input_path);
+  options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("baseline_intervals", &baseline_intervals);
+  options.AddDefaultOption("ring_degrees", &ring_degrees);
+  options.AddDefaultOption("image_size", &image_size);
+  options.AddDefaultOption("field_of_view", &field_of_view);
+  options.AddDefaultOption("world_up", &world_up);
+  options.AddDefaultOption("min_baseline_m", &min_baseline_m);
+  options.Parse(argc, argv);
+
+  CreateDirIfNotExists(output_path);
+
+  // 读取重建
+  Reconstruction reconstruction;
+  reconstruction.Read(input_path);
+
+  // 解析参数
+  const auto baselines = CSVToVector<int>(baseline_intervals);
+  const auto rings     = CSVToVector<double>(ring_degrees);
+  const auto upv       = CSVToVector<double>(world_up);
+
+  Eigen::Vector3d up(0, 1, 0);
+  if (upv.size() == 3) up = Eigen::Vector3d(upv[0], upv[1], upv[2]).normalized();
+
+  // 依次导出不同基线长度的双目对
+  for (const int k : baselines) {
+    if (k <= 0) {
+      std::cout << "Skip invalid baseline_interval=" << k << std::endl;
+      continue;
+    }
+    reconstruction.ExportStereoPairs(
+        output_path,                  // out_root
+        *options.image_path,          // ERP 原图目录
+        image_size,                   // 针孔输出尺寸
+        field_of_view,                // 针孔水平FOV（度）
+        k,                            // baseline_interval（帧间隔）
+        rings,                        // 环角集合（度）
+        up,                           // 世界上向量
+        min_baseline_m                // 最小基线（米）
+    );
+  }
+
+  return EXIT_SUCCESS;
+}
+
 }  // namespace colmap

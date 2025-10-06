@@ -11,5 +11,5 @@
 
 namespace colmap {
 int RunSphereCubicReprojecter(int argc, char** argv);
-
+int RunSphereStereoExporter(int argc, char** argv) ;
 }  // namespace colmap

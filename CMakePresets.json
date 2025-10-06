@@ -1,0 +1,46 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 17,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "ninja-cuda-debug",
+            "displayName": "Ninja + CUDA 12.1 (Debug)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "BLA_VENDOR": "Intel10_64lp",
+                "CMAKE_CUDA_ARCHITECTURES": "89",
+                "CUDAToolkit_ROOT": "/usr/local/cuda-12.1",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            },
+            "environment": {
+                "CUDACXX": "/usr/local/cuda-12.1/bin/nvcc"
+            }
+        },
+        {
+            "name": "ninja-cuda-relwithdebinfo",
+            "inherits": "ninja-cuda-debug",
+            "displayName": "Ninja + CUDA 12.1 (RelWithDebInfo)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "build-relwithdebinfo",
+            "configurePreset": "ninja-cuda-relwithdebinfo"
+        },
+        {
+            "name": "build-debug",
+            "description": "",
+            "displayName": "",
+            "configurePreset": "ninja-cuda-debug"
+        }
+    ]
+}

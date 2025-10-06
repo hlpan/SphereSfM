@@ -140,6 +140,7 @@ int main(int argc, char** argv) {
   commands.emplace_back("sequential_matcher", &RunSequentialMatcher);
   commands.emplace_back("spatial_matcher", &RunSpatialMatcher);
   commands.emplace_back("sphere_cubic_reprojecer", &RunSphereCubicReprojecter);
+  commands.emplace_back("sphere_export_stereo", &RunSphereStereoExporter);
   commands.emplace_back("stereo_fusion", &RunStereoFuser);
   commands.emplace_back("transitive_matcher", &RunTransitiveMatcher);
   commands.emplace_back("vocab_tree_builder", &RunVocabTreeBuilder);

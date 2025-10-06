@@ -42,7 +42,88 @@
 #include "util/bitmap.h"
 #include "util/misc.h"
 #include "util/ply.h"
+#include <Eigen/Geometry>
 
+namespace {  // ------- helpers (匿名命名空间) -------
+
+// Rodrigues 旋转
+inline Eigen::Matrix3d RodriguesRotate(const Eigen::Vector3d& axis_unit, double angle_rad) {
+  return Eigen::AngleAxisd(angle_rad, axis_unit).toRotationMatrix();
+}
+
+// 根据“垂直于基线的环”与环角，构造 rect 相机的世界系姿态：R_cam2world = [r|u|f]
+inline bool BuildRectifiedCamToWorld(const Eigen::Vector3d& C1,
+                                     const Eigen::Vector3d& C2,
+                                     const Eigen::Vector3d& world_up,
+                                     const double pitch_deg,
+                                     Eigen::Matrix3d* R_cam2world) {
+  const Eigen::Vector3d t = C2 - C1;
+  const double tnorm = t.norm();
+  if (tnorm < 1e-8) return false;
+
+  const Eigen::Vector3d n = t / tnorm;  // 基线方向（世界系）
+  Eigen::Vector3d g = world_up.normalized();
+
+  // 参考视轴：环上0°，侧看，且与 n、g 都正交
+  Eigen::Vector3d v = g.cross(n);
+  if (v.norm() < 1e-8) {
+    // g 与 n 近平行时的退化（例如几乎竖直运动）：换一个备用 "up"
+    g = Eigen::Vector3d(0, 0, 1);
+    v = g.cross(n);
+    if (v.norm() < 1e-8) return false;  // 仍退化就放弃
+  }
+  const Eigen::Vector3d d_ref = v.normalized();
+
+  // 环角旋转，得到本次视轴 d（仍然 ⟂ n）
+  const double phi = pitch_deg * M_PI / 180.0;
+  const Eigen::Matrix3d R_ring = RodriguesRotate(n, phi);
+  const Eigen::Vector3d d = (R_ring * d_ref).normalized(); // 前轴 forward
+
+  // 右、上、前轴（右手系），并组装 cam2world
+  const Eigen::Vector3d r = n;                    // 令图像 +x 沿基线方向
+  Eigen::Vector3d u = n.cross(d);                 // 世界“上轴”（相机的上）
+  const double un = u.norm();
+  if (un < 1e-12) return false;                   // 极端退化
+  u = u / un;
+
+  (*R_cam2world).col(0) = r;
+  (*R_cam2world).col(1) = u;
+  (*R_cam2world).col(2) = d;
+  return true;
+}
+
+// 针孔像素 -> 归一化针孔射线（相机系）
+inline Eigen::Vector3d PixelToRayCam(const colmap::Camera& pinhole,
+                                     const int x, const int y) {
+  const double fx = pinhole.FocalLength();
+  const double fy = fx;
+  const double cx = pinhole.PrincipalPointX();
+  const double cy = pinhole.PrincipalPointY();
+  const double Xc = (x - cx) / fx;
+  const double Yc = (y - cy) / fy;
+  const double Zc = 1.0;
+  Eigen::Vector3d v(Xc, Yc, Zc);
+  return v.normalized();
+}
+
+// 世界方向 dir_world -> ERP 像素 (u,v)（在“该帧相机系”里做经纬投影）
+inline void WorldDirToERP(const Eigen::Vector3d& dir_world,
+                          const Eigen::Matrix3d& Rcw,  // world->cam (该帧)
+                          const int W_erp, const int H_erp,
+                          double* u, double* v) {
+  // 转到该帧相机系
+  const Eigen::Vector3d dcam = Rcw * dir_world;  // 相机系方向
+  const double x = dcam(0), y = dcam(1), z = dcam(2);
+
+  // ERP 映射（COLMAP约定：theta in [-pi,pi], phi in [-pi/2,pi/2]）
+  const double theta = std::atan2(x, z);               // [-pi, pi]
+  const double phi   = std::asin(std::max(-1.0, std::min(1.0, y)));  // [-pi/2, pi/2]
+
+  *u = (theta / (2.0 * M_PI) + 0.5) * W_erp;
+  *v = (0.5 - phi / M_PI) * H_erp;
+}
+
+} // namespace
 namespace colmap {
 
 Reconstruction::Reconstruction()
@@ -1488,6 +1569,183 @@ void Reconstruction::ExportPerspectiveCubic(
   const std::string sparse_path = JoinPaths(path, "sparse");
   CreateDirIfNotExists(sparse_path);
   cubic_reconstruction.Write(sparse_path);
+}
+
+
+// -------- 主函数：导出整流后的双目针孔图像 --------
+void Reconstruction::ExportStereoPairs(
+    const std::string& out_path,           // 输出根目录
+    const std::string& image_path,         // ERP原图所在目录（与 images.txt 一致）
+    const int image_size,                  // 目标针孔图尺寸（正方形），<=0 则按高度/2
+    const double field_of_view_deg,        // 目标针孔水平FOV（度）
+    const int baseline_interval,           // 帧间隔（基线长度由间隔*运动速度决定）
+    const std::vector<double>& ring_degrees, // 环角集合，建议 {0,60,120,180,240,300}
+    const Eigen::Vector3d& world_up,       // 世界“上”向量（无IMU可用 [0,1,0]）
+    const double min_baseline_m            // 过短基线的剔除阈值（米）
+) const {
+  using namespace colmap;
+
+  if (baseline_interval <= 0 || ring_degrees.empty()) {
+    std::cout << "ExportStereoPairs: invalid baseline_interval or ring list.\n";
+    return;
+  }
+
+  // 创建输出目录
+  std::string base_path = EnsureTrailingSlash(StringReplace(out_path, "\\", "/"));
+  CreateDirIfNotExists(base_path);
+  base_path = base_path + "stereo/";
+  CreateDirIfNotExists(base_path);
+  // 给不同间隔分子目录
+  std::string interval_dir = base_path + StringPrintf("baseline_%d/", baseline_interval);
+  CreateDirIfNotExists(interval_dir);
+
+  // pinhole 相机（单一规格，便于下游）
+  // 参照 ExportPerspectiveCubic：image_size<=0 时取 H/2
+  const bool has_any_sphere = true;
+
+  // 遍历时间序列中的配对 (i, j=i+baseline_interval)
+  const int N = static_cast<int>(reg_image_ids_.size());
+  if (N <= baseline_interval) {
+    std::cout << "ExportStereoPairs: not enough images.\n";
+    return;
+  }
+
+  for (int i = 268; i + baseline_interval < N; ++i) {
+    const image_t id1 = reg_image_ids_[i];
+    const image_t id2 = reg_image_ids_[i + baseline_interval];
+
+    const class Image& img1 = Image(id1);
+    const class Image& img2 = Image(id2);
+    const class Camera& cam1 = Camera(img1.CameraId());
+    const class Camera& cam2 = Camera(img2.CameraId());
+
+    if (!cam1.IsSpherical() || !cam2.IsSpherical()) {
+      // 只处理 ERP（球面）相机
+      continue;
+    }
+
+    // 读取 ERP 位图
+    const std::string erp1_path = JoinPaths(image_path, img1.Name());
+    const std::string erp2_path = JoinPaths(image_path, img2.Name());
+    Bitmap bmp1, bmp2;
+    if (!bmp1.Read(erp1_path)) {
+      std::cout << StringPrintf("Fail to read image %s", erp1_path.c_str()) << std::endl;
+      continue;
+    }
+    if (!bmp2.Read(erp2_path)) {
+      std::cout << StringPrintf("Fail to read image %s", erp2_path.c_str()) << std::endl;
+      continue;
+    }
+    const int W_erp1 = static_cast<int>(bmp1.Width());
+    const int H_erp1 = static_cast<int>(bmp1.Height());
+    const int W_erp2 = static_cast<int>(bmp2.Width());
+    const int H_erp2 = static_cast<int>(bmp2.Height());
+
+    // 该对帧的基线与投影中心
+    const Eigen::Vector3d C1 = img1.ProjectionCenter();
+    const Eigen::Vector3d C2 = img2.ProjectionCenter();
+    const Eigen::Vector3d t = C2 - C1;
+    std::cout << t << std::endl;
+    const double B = t.norm();
+    if (B < std::max(1e-6, min_baseline_m)) {
+      // 跳过过短基线
+      continue;
+    }
+
+    // 该对帧的 world->cam 旋转
+    const Eigen::Matrix3d Rcw1 = img1.RotationMatrix(); // world -> cam1
+    const Eigen::Matrix3d Rcw2 = img2.RotationMatrix(); // world -> cam2
+
+    // 目标针孔规格（与 ExportPerspectiveCubic 相同策略）
+    int out_wh = image_size > 0 ? image_size : (cam1.Height() / 2);
+    if (out_wh <= 0) out_wh = 512;
+    class Camera pinhole = PinholeCamera(out_wh, out_wh, field_of_view_deg);
+
+    // 为该(i,j)对创建目录：/baseline_k/PAIR_i_j/
+    std::string pair_dir = interval_dir + StringPrintf("PAIR_%06d_%06d/", id1, id2);
+    CreateDirIfNotExists(pair_dir);
+
+    // 每个环角导出一对 Left/Right
+    for (const double phi_deg : ring_degrees) {
+
+      // 构造 rect 相机的世界姿态 R_cam2world
+      Eigen::Matrix3d R_cam2world;
+      if (!BuildRectifiedCamToWorld(C1, C2, world_up, phi_deg, &R_cam2world)) {
+        std::cout << "Skip pair due to degenerate rect basis.\n";
+        continue;
+      }
+      Eigen::Vector3d t_cam = R_cam2world.transpose() * (C2 - C1);
+      CHECK(std::abs(t_cam.y()) < 1e-6 && std::abs(t_cam.z()) < 1e-6)
+          << "Baseline not aligned to +x in rectified camera.";
+      // 预备输出 Bitmap
+      Bitmap left_img, right_img;
+      left_img.Allocate(out_wh, out_wh, /*as_rgb=*/true);
+      right_img.Allocate(out_wh, out_wh, /*as_rgb=*/true);
+
+      // 遍历输出像素，做 ERP 采样（双线性）
+      for (int y = 0; y < out_wh; ++y) {
+        for (int x = 0; x < out_wh; ++x) {
+          // 针孔射线（相机系）
+          const Eigen::Vector3d dir_cam = PixelToRayCam(pinhole, x, y);
+          // 世界系方向
+          const Eigen::Vector3d dir_world = R_cam2world * dir_cam;
+
+          // 映射到两帧各自的 ERP
+          double u1, v1, u2, v2;
+          WorldDirToERP(dir_world, Rcw1, W_erp1, H_erp1, &u1, &v1);
+          WorldDirToERP(dir_world, Rcw2, W_erp2, H_erp2, &u2, &v2);
+
+          BitmapColor<float> c1, c2;
+          // 边界外可做 clamp 或者设成黑（这里用 clamp 到边界采样）
+          const double uu1 = std::min(std::max(u1, 0.0), W_erp1 - 1.0);
+          const double vv1 = std::min(std::max(v1, 0.0), H_erp1 - 1.0);
+          const double uu2 = std::min(std::max(u2, 0.0), W_erp2 - 1.0);
+          const double vv2 = std::min(std::max(v2, 0.0), H_erp2 - 1.0);
+
+          bmp1.InterpolateBilinear(uu1 - 0.5, vv1 - 0.5, &c1);
+          bmp2.InterpolateBilinear(uu2 - 0.5, vv2 - 0.5, &c2);
+
+          // 写到输出
+          BitmapColor<uint8_t> c1u = c1.Cast<uint8_t>();
+          BitmapColor<uint8_t> c2u = c2.Cast<uint8_t>();
+          left_img.SetPixel(x, y, c1u);
+          right_img.SetPixel(x, y, c2u);
+        }
+      }
+
+      // 文件名：PAIR_i_j/phi_xxx/left.png, right.png
+      std::string phi_dir = pair_dir + StringPrintf("phi_%03d/", (int)std::round(phi_deg));
+      CreateDirIfNotExists(phi_dir);
+
+      // 你也可以把 meta 存到 JSON（K, R, baseline, phi）
+      const std::string left_path  = phi_dir + "left.png";
+      const std::string right_path = phi_dir + "right.png";
+      left_img.Write(left_path);
+      right_img.Write(right_path);
+
+      // 可选：写 meta
+      {
+        const std::string meta_path = phi_dir + "meta.txt";
+        std::ofstream f(meta_path, std::ios::trunc);
+        if (f.is_open()) {
+          f.precision(17);
+          f << "image_ids " << id1 << " " << id2 << "\n";
+          f << "baseline_m " << B << "\n";
+          f << "phi_deg " << phi_deg << "\n";
+          f << "pinhole_W " << out_wh << " pinhole_H " << out_wh
+            << " fov_deg " << field_of_view_deg << "\n";
+          f << "K fx " << pinhole.FocalLength() << " fy " << pinhole.FocalLength()
+            << " cx " << pinhole.PrincipalPointX() << " cy " << pinhole.PrincipalPointY() << "\n";
+          // R_cam2world
+          f << "R_cam2world\n";
+          f << R_cam2world(0,0) << " " << R_cam2world(0,1) << " " << R_cam2world(0,2) << "\n";
+          f << R_cam2world(1,0) << " " << R_cam2world(1,1) << " " << R_cam2world(1,2) << "\n";
+          f << R_cam2world(2,0) << " " << R_cam2world(2,1) << " " << R_cam2world(2,2) << "\n";
+          f.close();
+        }
+      }
+    } // for each phi
+  }   // for pairs
 }
 
 bool Reconstruction::ExtractColorsForImage(const image_t image_id,
