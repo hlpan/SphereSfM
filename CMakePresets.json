@@ -34,6 +34,8 @@
     "buildPresets": [
         {
             "name": "build-relwithdebinfo",
+            "description": "",
+            "displayName": "",
             "configurePreset": "ninja-cuda-relwithdebinfo"
         },
         {

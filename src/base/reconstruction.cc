@@ -41,6 +41,7 @@
 #include "base/triangulation.h"
 #include "util/bitmap.h"
 #include "util/misc.h"
+#include "util/threading.h"
 #include "util/ply.h"
 #include <Eigen/Geometry>
 
@@ -150,38 +151,6 @@ inline bool BuildRectifiedCamToWorld(const Eigen::Vector3d& C1,
   *R_cam2world = R;
   return true;
 }
-
-// 针孔像素 -> 归一化针孔射线（相机系）
-inline Eigen::Vector3d PixelToRayCam(const colmap::Camera& pinhole,
-                                     const int x, const int y) {
-  const double fx = pinhole.FocalLength();
-  const double fy = fx;
-  const double cx = pinhole.PrincipalPointX();
-  const double cy = pinhole.PrincipalPointY();
-  const double Xc = (x - cx) / fx;
-  const double Yc = (y - cy) / fy;
-  const double Zc = 1.0;
-  Eigen::Vector3d v(Xc, Yc, Zc);
-  return v.normalized();
-}
-
-// 世界方向 dir_world -> ERP 像素 (u,v)（在“该帧相机系”里做经纬投影）
-inline void WorldDirToERP(const Eigen::Vector3d& dir_world,
-                          const Eigen::Matrix3d& Rcw,  // world->cam (该帧)
-                          const int W_erp, const int H_erp,
-                          double* u, double* v) {
-  // 转到该帧相机系
-  const Eigen::Vector3d dcam = Rcw * dir_world;  // 相机系方向
-  const double x = dcam(0), y = dcam(1), z = dcam(2);
-
-  // ERP 映射（COLMAP约定：theta in [-pi,pi], phi in [-pi/2,pi/2]）
-  const double theta = std::atan2(x, z);               // [-pi, pi]
-  const double phi   = std::asin(std::max(-1.0, std::min(1.0, y)));  // [-pi/2, pi/2]
-
-  *u = (theta / (2.0 * M_PI) + 0.5) * W_erp;
-  *v = (0.5 - phi / M_PI) * H_erp;
-}
-
 } // namespace
 namespace colmap {
 
@@ -1633,34 +1602,33 @@ void Reconstruction::ExportPerspectiveCubic(
 
 // -------- 主函数：导出整流后的双目针孔图像 --------
 void Reconstruction::ExportStereoPairs(
-    const std::string& out_path,           // 输出根目录
-    const std::string& image_path,         // ERP原图所在目录（与 images.txt 一致）
-    const int image_size,                  // 目标针孔图尺寸（正方形），<=0 则按高度/2
-    const double field_of_view_deg,        // 目标针孔水平FOV（度）
-    const int baseline_interval,           // 帧间隔（基线长度由间隔*运动速度决定）
-    const std::vector<double>& ring_degrees, // 环角集合，建议 {0,60,120,180,240,300}
-    const Eigen::Vector3d& world_up,       // 世界“上”向量（无IMU可用 [0,1,0]）
-    const double min_baseline_m            // 过短基线的剔除阈值（米）
+    const std::string& out_path,     // 输出根目录
+    const std::string& image_path,   // ERP原图所在目录（与 images.txt 一致）
+    const int image_size,            // 目标针孔图尺寸（正方形），<=0 则按高度/2
+    const double field_of_view_deg,  // 目标针孔水平FOV（度）
+    const int baseline_interval,     // 帧间隔（基线长度由间隔*运动速度决定）
+    const std::vector<double>&
+        ring_degrees,                 // 环角集合，建议 {0,60,120,180,240,300}
+    const Eigen::Vector3d& world_up,  // 世界“上”向量（无IMU可用 [0,1,0]）
+    const double min_baseline_m       // 过短基线的剔除阈值（米）
 ) const {
   using namespace colmap;
-
+  Reconstruction left_reconstruction;
   if (baseline_interval <= 0 || ring_degrees.empty()) {
     std::cout << "ExportStereoPairs: invalid baseline_interval or ring list.\n";
     return;
   }
 
   // 创建输出目录
-  std::string base_path = EnsureTrailingSlash(StringReplace(out_path, "\\", "/"));
+  std::string base_path =
+      EnsureTrailingSlash(StringReplace(out_path, "\\", "/"));
   CreateDirIfNotExists(base_path);
   base_path = base_path + "stereo/";
   CreateDirIfNotExists(base_path);
   // 给不同间隔分子目录
-  std::string interval_dir = base_path + StringPrintf("baseline_%d/", baseline_interval);
+  std::string interval_dir =
+      base_path + StringPrintf("baseline_%d/", baseline_interval);
   CreateDirIfNotExists(interval_dir);
-
-  // pinhole 相机（单一规格，便于下游）
-  // 参照 ExportPerspectiveCubic：image_size<=0 时取 H/2
-  const bool has_any_sphere = true;
 
   // 遍历时间序列中的配对 (i, j=i+baseline_interval)
   const int N = static_cast<int>(reg_image_ids_.size());
@@ -1688,17 +1656,15 @@ void Reconstruction::ExportStereoPairs(
     const std::string erp2_path = JoinPaths(image_path, img2.Name());
     Bitmap bmp1, bmp2;
     if (!bmp1.Read(erp1_path)) {
-      std::cout << StringPrintf("Fail to read image %s", erp1_path.c_str()) << std::endl;
+      std::cout << StringPrintf("Fail to read image %s", erp1_path.c_str())
+                << std::endl;
       continue;
     }
     if (!bmp2.Read(erp2_path)) {
-      std::cout << StringPrintf("Fail to read image %s", erp2_path.c_str()) << std::endl;
+      std::cout << StringPrintf("Fail to read image %s", erp2_path.c_str())
+                << std::endl;
       continue;
     }
-    const int W_erp1 = static_cast<int>(bmp1.Width());
-    const int H_erp1 = static_cast<int>(bmp1.Height());
-    const int W_erp2 = static_cast<int>(bmp2.Width());
-    const int H_erp2 = static_cast<int>(bmp2.Height());
 
     // 该对帧的基线与投影中心
     const Eigen::Vector3d C1 = img1.ProjectionCenter();
@@ -1708,60 +1674,181 @@ void Reconstruction::ExportStereoPairs(
     const double B = t.norm();
     if (B < std::max(1e-6, min_baseline_m)) {
       // 跳过过短基线
+      LOG(INFO) << StringPrintf(
+          "Skip pair %d-%d due to too short baseline: %.3f m", id1, id2, B);
       continue;
     }
 
     // 该对帧的 world->cam 旋转
-    const Eigen::Matrix3d Rcw1 = img1.RotationMatrix(); // world -> cam1
-    const Eigen::Matrix3d Rcw2 = img2.RotationMatrix(); // world -> cam2
+    const Eigen::Matrix3d Rcw1 = img1.RotationMatrix();  // world -> cam1
+    const Eigen::Matrix3d Rcw2 = img2.RotationMatrix();  // world -> cam2
 
     // 目标针孔规格（与 ExportPerspectiveCubic 相同策略）
     int out_wh = image_size > 0 ? image_size : (cam1.Height() / 2);
     if (out_wh <= 0) out_wh = 512;
-    class Camera pinhole_camera = PinholeCamera(out_wh, out_wh, field_of_view_deg);
+    class Camera pinhole_camera =
+        PinholeCamera(out_wh, out_wh, field_of_view_deg);
+    pinhole_camera.SetCameraId(cam1.CameraId());  // 用原相机ID
 
     // 为该(i,j)对创建目录：/baseline_k/PAIR_i_j/
-    std::string pair_dir = interval_dir + StringPrintf("PAIR_%06d_%06d/", id1, id2);
+    std::string pair_dir =
+        interval_dir + StringPrintf("PAIR_%06d_%06d/", id1, id2);
     CreateDirIfNotExists(pair_dir);
 
-    // 每个环角导出一对 Left/Right
-    for (const double phi_deg : ring_degrees) {
-      // 构造 rect 相机的世界姿态 R_cam2world
-      Eigen::Matrix3d R_cam2world;
-      if (!BuildRectifiedCamToWorld(C1, C2, world_up, phi_deg, &R_cam2world)) {
-        std::cout << "Skip pair due to degenerate rect basis.\n";
-        continue;
-      }
-      Eigen::Vector3d t_cam = R_cam2world.transpose() * (C2 - C1);
-      CHECK(std::abs(t_cam.y()) < 1e-6 && std::abs(t_cam.z()) < 1e-6)
-          << "Baseline not aligned to +x in rectified camera.";
+    // 要传给 SphericalToTangent 的 rotation（针孔 -> ERP相机）
+    const size_t M = ring_degrees.size();
 
-      Eigen::Matrix3d R_rect_cam2world = R_cam2world;
+    struct RenderResult {
+      Bitmap left_img;
+      Bitmap right_img;
+      Eigen::Matrix3d R_rect_cam2world;
+      double phi_deg = 0.0;
+    };
 
-      
+    std::vector<RenderResult> results(M);
 
-      // 要传给 SphericalToTangent 的 rotation（针孔 -> ERP相机）
-      Eigen::Matrix3d R_sphere_from_pinhole_1 = Rcw1 * R_rect_cam2world;
-      Eigen::Matrix3d R_sphere_from_pinhole_2 = Rcw2 * R_rect_cam2world;
+    // Prepare thread pool for rendering all ring angles in parallel.
+    const int kMaxNumThreads = -1;
+    const int num_eff_threads = GetEffectiveNumThreads(kMaxNumThreads);
+    const int num_workers = std::min(static_cast<int>(M), num_eff_threads);
+    ThreadPool thread_pool(num_workers);
 
-      Bitmap left_img, right_img;
-      SphericalToTangent(cam1, bmp1, R_sphere_from_pinhole_1, pinhole_camera, left_img);
-      SphericalToTangent(cam2, bmp2, R_sphere_from_pinhole_2, pinhole_camera, right_img);
+    for (size_t pi = 0; pi < M; ++pi) {
+      thread_pool.AddTask([&, pi]() {
+        const double phi = ring_degrees[pi];
+        Eigen::Matrix3d R_cam2world_tmp;
+        if (!BuildRectifiedCamToWorld(C1, C2, world_up, phi,
+                                      &R_cam2world_tmp)) {
+          // leave empty result to signal skip
+          results[pi].phi_deg = std::numeric_limits<double>::quiet_NaN();
+          return;
+        }
+
+        const Eigen::Matrix3d R_sphere_from_pinhole_1 = Rcw1 * R_cam2world_tmp;
+        const Eigen::Matrix3d R_sphere_from_pinhole_2 = Rcw2 * R_cam2world_tmp;
+
+        // Render left/right tangent images.
+        SphericalToTangent(cam1, bmp1, R_sphere_from_pinhole_1, pinhole_camera,
+                           results[pi].left_img);
+        SphericalToTangent(cam2, bmp2, R_sphere_from_pinhole_2, pinhole_camera,
+                           results[pi].right_img);
+
+        results[pi].R_rect_cam2world = R_cam2world_tmp;
+        results[pi].phi_deg = phi;
+      });
+    }
+    thread_pool.Wait();
+
+    // Post-process rendered results: write files and insert left images
+    // (camera, image, point3D) into left_reconstruction.
+    struct Landmark {
+      Landmark(const Eigen::Vector3d& XYZ_, const Track& track_,
+               const Eigen::Vector3ub& color_)
+          : XYZ(XYZ_), track(track_), color(color_) {}
+      Eigen::Vector3d XYZ;
+      Track track;
+      Eigen::Vector3ub color;
+    };
+
+    std::map<image_t, std::vector<Eigen::Vector2d>> image_obs;
+    std::vector<Landmark> landmarks;
+
+    for (size_t pi = 0; pi < M; ++pi) {
+      if (!std::isfinite(results[pi].phi_deg)) continue;  // skipped
+      const double phi = results[pi].phi_deg;
+      const Eigen::Matrix3d R_cam2world_final = results[pi].R_rect_cam2world;
 
       // 文件名：PAIR_i_j/phi_xxx/left.png, right.png
-      std::string phi_dir = pair_dir + StringPrintf("phi_%03d/", (int)std::round(phi_deg));
+      std::string phi_dir =
+          pair_dir + StringPrintf("phi_%03d/", (int)std::round(phi));
       CreateDirIfNotExists(phi_dir);
-
-      // 你也可以把 meta 存到 JSON（K, R, baseline, phi）
-      const std::string left_path  = phi_dir + "left.png";
+      const std::string left_path = phi_dir + "left.png";
       const std::string right_path = phi_dir + "right.png";
-      left_img.Write(left_path);
-      right_img.Write(right_path);
-      
+      results[pi].left_img.Write(left_path);
+      results[pi].right_img.Write(right_path);
+
+      // Add/ensure pinhole camera exists in left_reconstruction.
+      if (!left_reconstruction.ExistsCamera(pinhole_camera.CameraId())) {
+        class Camera pin_cam = pinhole_camera;
+        // Keep same camera id as original spherical camera to preserve info.
+        pin_cam.SetCameraId(cam1.CameraId());
+        left_reconstruction.AddCamera(pin_cam);
+      }
+
+      // Create unique image id for this left image.
+      const image_t left_image_id = static_cast<image_t>(M * id1 + pi);
+
+      if (!left_reconstruction.ExistsImage(left_image_id)) {
+        class Image left_image;
+        left_image.SetImageId(left_image_id);
+        left_image.SetCameraId(pinhole_camera.CameraId());
+        left_image.SetName(GetPathBaseName(left_path));
+        left_image.SetName(StringReplace(left_image.Name(), "\\", "/"));
+
+        // pinhole camera pose: use rectified cam2world and center C1 for left
+        const Eigen::Matrix3d R_world2cam = R_cam2world_final.transpose();
+        left_image.Qvec() = RotationMatrixToQuaternion(R_world2cam);
+        left_image.Tvec() = -1.0 * QuaternionRotatePoint(left_image.Qvec(), C1);
+
+        left_reconstruction.AddImage(left_image);
+        left_reconstruction.RegisterImage(left_image_id);
+      }
     }
 
-     
-  }   // for pairs
+    // Associate 3D points with new left perspective images.
+    for (const auto& point3D : points3D_) {
+      const Eigen::Vector3d& XYZ = point3D.second.XYZ();
+      Track new_track;
+
+      for (size_t pi = 0; pi < M; ++pi) {
+        if (!std::isfinite(results[pi].phi_deg)) continue;
+
+        const image_t left_image_id = static_cast<image_t>(M * id1 + pi);
+        if (!left_reconstruction.ExistsImage(left_image_id)) continue;
+
+        class Image& left_image = left_reconstruction.Image(left_image_id);
+        const class Camera& left_cam =
+            left_reconstruction.Camera(left_image.CameraId());
+
+        Eigen::Vector2d projection =
+            ProjectPointToImage(XYZ, left_image.ProjectionMatrix(), left_cam);
+        if (projection.x() < 0 || projection.x() > left_cam.Width() ||
+            projection.y() < 0 || projection.y() > left_cam.Height()) {
+          continue;
+        }
+
+        const Eigen::Vector3d cam_to_point_dir =
+            (XYZ - left_image.ProjectionCenter()).normalized();
+        const double angle = RadToDeg(
+            std::acos(cam_to_point_dir.dot(left_image.ViewingDirection())));
+        if (angle < 0 || angle > 90) continue;
+
+        if (image_obs.count(left_image_id) > 0) {
+          image_obs.at(left_image_id).push_back(projection);
+        } else {
+          image_obs[left_image_id].push_back(projection);
+        }
+
+        new_track.AddElement(left_image_id,
+                             image_obs[left_image_id].size() - 1);
+      }
+
+      if (new_track.Length() > 0) {
+        landmarks.emplace_back(XYZ, new_track, point3D.second.Color());
+      }
+    }
+
+    for (const auto& image_ob : image_obs) {
+      left_reconstruction.Image(image_ob.first).SetPoints2D(image_ob.second);
+    }
+    for (const auto& lm : landmarks) {
+      left_reconstruction.AddPoint3D(lm.XYZ, lm.track, lm.color);
+    }
+  }  // for pairs
+  // Write left reconstruction.
+  const std::string sparse_path = JoinPaths(base_path, "sparse");
+  CreateDirIfNotExists(sparse_path);
+  left_reconstruction.Write(sparse_path);
 }
 
 bool Reconstruction::ExtractColorsForImage(const image_t image_id,
