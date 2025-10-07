@@ -65,6 +65,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
   // 过短基线剔除阈值（米）
   double min_baseline_m = 0.05;
 
+  // ERP mask 目录（可选），为空则不导出 mask
+  std::string mask_path = "";
   OptionManager options;
   options.AddImageOptions();  // 提供 --image_path
   options.AddRequiredOption("input_path", &input_path);
@@ -75,6 +77,7 @@ int RunSphereStereoExporter(int argc, char** argv) {
   options.AddDefaultOption("field_of_view", &field_of_view);
   options.AddDefaultOption("world_up", &world_up);
   options.AddDefaultOption("min_baseline_m", &min_baseline_m);
+  options.AddDefaultOption("mask_path", &mask_path);
   options.Parse(argc, argv);
 
   CreateDirIfNotExists(output_path);
@@ -105,7 +108,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
         k,                            // baseline_interval（帧间隔）
         rings,                        // 环角集合（度）
         up,                           // 世界上向量
-        min_baseline_m                // 最小基线（米）
+        min_baseline_m,                // 最小基线（米）
+        mask_path
     );
   }
 

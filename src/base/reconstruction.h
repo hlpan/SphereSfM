@@ -392,7 +392,8 @@ class Reconstruction {
     const int baseline_interval,           // 帧间隔（基线长度由间隔*运动速度决定）
     const std::vector<double>& ring_degrees, // 环角集合，建议 {0,60,120,180,240,300}
     const Eigen::Vector3d& world_up,       // 世界“上”向量（无IMU可用 [0,1,0]）
-    const double min_baseline_m            // 过短基线的剔除阈值（米）
+    const double min_baseline_m,            // 过短基线的剔除阈值（米）
+    const std::string& erp_mask_dir   // <--- 新增：ERP mask 目录；为空则不导出mask
 ) const;
   // Extract colors for 3D points of given image. Colors will be extracted
   // only for 3D points which are completely black.

@@ -45,8 +45,33 @@
 #include "util/ply.h"
 #include <Eigen/Geometry>
 
-namespace {  // ------- helpers (匿名命名空间) -------
+namespace colmap {
+// erp: 000123.jpg, mask: 000123.jpg.png
+bool TryReadMask(const std::string& erp_mask_dir,
+                 const std::string& erp_rel_name,  // e.g. "seq/000123.jpg"
+                 Bitmap* out) {
+  if (erp_mask_dir.empty()) return false;
 
+  const std::string p_mask = JoinPaths(erp_mask_dir, erp_rel_name + ".png");
+  if (ExistsFile(p_mask) && out->Read(p_mask)) return true;
+
+  return false;
+}
+
+// 可选：把双线性插值后的灰阶/彩色 mask 二值化（127 阈值）
+// 若你更喜欢“软”mask，可直接不用这个函数。
+void BinarizeInPlace(Bitmap* bmp, uint8_t thr = 127) {
+  BitmapColor<uint8_t> c;
+  for (int y = 0; y < bmp->Height(); ++y) {
+    for (int x = 0; x < bmp->Width(); ++x) {
+      bmp->GetPixel(x, y, &c);
+      const uint8_t g = static_cast<uint8_t>(0.299 * c.r + 0.587 * c.g + 0.114 * c.b + 0.5);
+      const uint8_t v = (g > thr) ? 255 : 0;
+      c.r = c.g = c.b = v;
+      bmp->SetPixel(x, y, c);
+    }
+  }
+}
 // Rodrigues 旋转
 inline Eigen::Matrix3d RodriguesRotate(const Eigen::Vector3d& axis_unit, double angle_rad) {
   return Eigen::AngleAxisd(angle_rad, axis_unit).toRotationMatrix();
@@ -151,8 +176,8 @@ inline bool BuildRectifiedCamToWorld(const Eigen::Vector3d& C1,
   *R_cam2world = R;
   return true;
 }
-} // namespace
-namespace colmap {
+
+
 
 Reconstruction::Reconstruction()
     : correspondence_graph_(nullptr), num_added_points3D_(0) {}
@@ -1610,7 +1635,8 @@ void Reconstruction::ExportStereoPairs(
     const std::vector<double>&
         ring_degrees,                 // 环角集合，建议 {0,60,120,180,240,300}
     const Eigen::Vector3d& world_up,  // 世界“上”向量（无IMU可用 [0,1,0]）
-    const double min_baseline_m       // 过短基线的剔除阈值（米）
+    const double min_baseline_m,       // 过短基线的剔除阈值（米）
+    const std::string& erp_mask_dir   // <--- 新增：ERP mask 目录；为空则不导出mask
 ) const {
   using namespace colmap;
   Reconstruction left_reconstruction;
@@ -1676,7 +1702,7 @@ void Reconstruction::ExportStereoPairs(
     const class Camera& cam1 = Camera(img1.CameraId());
     const class Camera& cam2 = Camera(img2.CameraId());
     if (!cam1.IsSpherical() || !cam2.IsSpherical()) continue;
-
+    
     const std::string erp1_path = JoinPaths(image_path, img1.Name());
     const std::string erp2_path = JoinPaths(image_path, img2.Name());
     Bitmap bmp1, bmp2;
@@ -1684,6 +1710,17 @@ void Reconstruction::ExportStereoPairs(
       std::cout << "Fail to read pair images " << erp1_path << " / " << erp2_path << std::endl;
       continue;
     }
+
+    // --- 尝试读取与 ERP 同名的 mask（位于 erp_mask_dir）---
+    Bitmap mask1, mask2;
+    const bool has_mask1 = TryReadMask(erp_mask_dir, img1.Name(), &mask1);
+    const bool has_mask2 = TryReadMask(erp_mask_dir, img2.Name(), &mask2);
+
+    // 如果 mask 分辨率与 ERP 不一致，构造匹配分辨率的“球面相机副本”以保证采样正确
+    class Camera mask_cam1 = Camera(img1.CameraId());
+    class Camera mask_cam2 = Camera(img2.CameraId());
+    if (has_mask1) { mask_cam1.SetWidth(mask1.Width()); mask_cam1.SetHeight(mask1.Height()); }
+    if (has_mask2) { mask_cam2.SetWidth(mask2.Width()); mask_cam2.SetHeight(mask2.Height()); }
 
     const Eigen::Vector3d C1 = img1.ProjectionCenter();
     const Eigen::Vector3d C2 = img2.ProjectionCenter();
@@ -1741,6 +1778,24 @@ void Reconstruction::ExportStereoPairs(
       const std::string right_path = phi_dir + "right.png";
       results[pi].left_img.Write(left_path);
       results[pi].right_img.Write(right_path);
+
+      // ---- 写 mask ----
+      if (has_mask1) {
+        Bitmap left_mask;
+        const Eigen::Matrix3d R_sphere_from_pinhole_1 = Rcw1 * results[pi].R_rect_cam2world;
+        SphericalToTangent(mask_cam1, mask1, R_sphere_from_pinhole_1, pinhole_proto, left_mask);
+        // 可选：二值化（避免双线性采样产生灰边）
+        BinarizeInPlace(&left_mask, 127);
+        left_mask.Write(phi_dir + "left-mask.png");
+      }
+
+      if (has_mask2) {
+        Bitmap right_mask;
+        const Eigen::Matrix3d R_sphere_from_pinhole_2 = Rcw2 * results[pi].R_rect_cam2world;
+        SphericalToTangent(mask_cam2, mask2, R_sphere_from_pinhole_2, pinhole_proto, right_mask);
+        BinarizeInPlace(&right_mask, 127);
+        right_mask.Write(phi_dir + "right-mask.png");
+      }
 
       // 新建唯一的 left 图像ID
       const image_t left_image_id = static_cast<image_t>( (uint64_t)1000000 * id1 + (uint64_t)phi_i );
