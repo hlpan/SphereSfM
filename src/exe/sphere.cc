@@ -49,6 +49,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
   std::string input_path;
   std::string output_path;
 
+  // 处理图像间隔（单位帧）
+  int image_interval = 1;
   // 逗号分隔：可一次跑多组基线间隔（例如 "3,10,30"）
   std::string baseline_intervals = "10";
 
@@ -71,6 +73,7 @@ int RunSphereStereoExporter(int argc, char** argv) {
   options.AddImageOptions();  // 提供 --image_path
   options.AddRequiredOption("input_path", &input_path);
   options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("image_interval", &image_interval);
   options.AddDefaultOption("baseline_intervals", &baseline_intervals);
   options.AddDefaultOption("ring_degrees", &ring_degrees);
   options.AddDefaultOption("image_size", &image_size);
@@ -105,6 +108,7 @@ int RunSphereStereoExporter(int argc, char** argv) {
         *options.image_path,          // ERP 原图目录
         image_size,                   // 针孔输出尺寸
         field_of_view,                // 针孔水平FOV（度）
+        image_interval,               // 图像间隔（帧）
         k,                            // baseline_interval（帧间隔）
         rings,                        // 环角集合（度）
         up,                           // 世界上向量

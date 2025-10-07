@@ -389,6 +389,7 @@ class Reconstruction {
     const std::string& image_path,         // ERP原图所在目录（与 images.txt 一致）
     const int image_size,                  // 目标针孔图尺寸（正方形），<=0 则按高度/2
     const double field_of_view_deg,        // 目标针孔水平FOV（度）
+    const int image_interval,        // 处理的帧间隔
     const int baseline_interval,           // 帧间隔（基线长度由间隔*运动速度决定）
     const std::vector<double>& ring_degrees, // 环角集合，建议 {0,60,120,180,240,300}
     const Eigen::Vector3d& world_up,       // 世界“上”向量（无IMU可用 [0,1,0]）

@@ -44,8 +44,40 @@
 #include "util/threading.h"
 #include "util/ply.h"
 #include <Eigen/Geometry>
+#include <iomanip>
 
 namespace colmap {
+
+// 写出 FoundationStereo 调试用的 cam.json
+// R_wc: world->cam 的 3x3，t_c: t 向量（等于 -R*C）
+inline void WriteCamJson(const std::string& json_path,
+                         int width, int height,
+                         double f, double cx, double cy,
+                         const Eigen::Matrix3d& R_wc,
+                         const Eigen::Vector3d& t_c,
+                         double baseline) {
+  std::ofstream ofs(json_path);
+  ofs.setf(std::ios::fixed);
+  ofs << std::setprecision(17);
+
+  ofs << "{\n";
+  ofs << "  \"baseline\": " << baseline << ",\n"; 
+  ofs << "  \"width\": "  << width  << ",\n";
+  ofs << "  \"height\": " << height << ",\n";
+  ofs << "  \"f\": "      << f      << ",\n";
+  ofs << "  \"cx\": "     << cx     << ",\n";
+  ofs << "  \"cy\": "     << cy     << ",\n";
+  ofs << "  \"Rt\": [\n";
+  for (int r = 0; r < 3; ++r) {
+    ofs << "    ["
+        << R_wc(r,0) << ", " << R_wc(r,1) << ", " << R_wc(r,2) << ", " << t_c(r)
+        << "]";
+    ofs << (r == 2 ? "\n" : ",\n");
+  }
+  ofs << "  ]\n";
+  ofs << "}\n";
+}
+
 // erp: 000123.jpg, mask: 000123.jpg.png
 bool TryReadMask(const std::string& erp_mask_dir,
                  const std::string& erp_rel_name,  // e.g. "seq/000123.jpg"
@@ -1631,6 +1663,7 @@ void Reconstruction::ExportStereoPairs(
     const std::string& image_path,   // ERP原图所在目录（与 images.txt 一致）
     const int image_size,            // 目标针孔图尺寸（正方形），<=0 则按高度/2
     const double field_of_view_deg,  // 目标针孔水平FOV（度）
+    const int image_interval,        // 处理的帧间隔
     const int baseline_interval,     // 帧间隔（基线长度由间隔*运动速度决定）
     const std::vector<double>&
         ring_degrees,                 // 环角集合，建议 {0,60,120,180,240,300}
@@ -1693,7 +1726,7 @@ void Reconstruction::ExportStereoPairs(
     double phi_deg = std::numeric_limits<double>::quiet_NaN();
   };
 
-  for (int i = 0; i + baseline_interval < N; ++i) {
+  for (int i = 0; i + baseline_interval < N; i+= image_interval) {
     const image_t id1 = reg_image_ids_[i];
     const image_t id2 = reg_image_ids_[i + baseline_interval];
 
@@ -1796,6 +1829,22 @@ void Reconstruction::ExportStereoPairs(
         BinarizeInPlace(&right_mask, 127);
         right_mask.Write(phi_dir + "right-mask.png");
       }
+      // 取针孔规格（与渲染一致）
+      const class Camera& left_cam = left_reconstruction.Camera(pinhole_cid);
+
+      // 这里的 R_world2cam 与你设置到 left_image 的一致
+      Eigen::Matrix3d R_world2cam = results[pi].R_rect_cam2world.transpose();
+      if (R_world2cam.determinant() < 0) R_world2cam = R_world2cam * (-1.0);
+
+      // t = -R * C1
+      Eigen::Vector3d t_cam = - R_world2cam * C1;
+
+      // 写 cam.json 到与图像同目录（PAIR_i_j/phi_xxx/）
+      const std::string cam_json = phi_dir + "cam.json";
+      WriteCamJson(cam_json, left_cam.Width(), left_cam.Height(), 
+      left_cam.FocalLength(), 
+      left_cam.PrincipalPointX(), left_cam.PrincipalPointY(), 
+      R_world2cam, t_cam, B);
 
       // 新建唯一的 left 图像ID
       const image_t left_image_id = static_cast<image_t>( (uint64_t)1000000 * id1 + (uint64_t)phi_i );
