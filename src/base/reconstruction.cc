@@ -1701,7 +1701,7 @@ void Reconstruction::ExportStereoPairs(
   if (out_wh <= 0) out_wh = 512;
 
   // 建一个（或按需多个）针孔相机ID。为避免与源相机冲突，新建独立ID更稳妥。
-  class Camera pinhole_proto = PinholeCamera(out_wh, out_wh, field_of_view_deg);
+  class Camera pinhole_proto = PinholeCamera(1.5*out_wh, out_wh, field_of_view_deg);
   camera_t pinhole_cid = static_cast<camera_t>(std::numeric_limits<uint32_t>::max() - 123);
   pinhole_proto.SetCameraId(pinhole_cid);
   left_reconstruction.AddCamera(pinhole_proto);
