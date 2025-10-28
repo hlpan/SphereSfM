@@ -69,6 +69,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
 
   // ERP mask 目录（可选），为空则不导出 mask
   std::string mask_path = "";
+  // 采样时的fps
+  double sample_fps = 10.0;
   OptionManager options;
   options.AddImageOptions();  // 提供 --image_path
   options.AddRequiredOption("input_path", &input_path);
@@ -81,6 +83,7 @@ int RunSphereStereoExporter(int argc, char** argv) {
   options.AddDefaultOption("world_up", &world_up);
   options.AddDefaultOption("min_baseline_m", &min_baseline_m);
   options.AddDefaultOption("mask_path", &mask_path);
+  options.AddDefaultOption("sample_fps", &sample_fps);
   options.Parse(argc, argv);
 
   CreateDirIfNotExists(output_path);
@@ -113,7 +116,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
         rings,                        // 环角集合（度）
         up,                           // 世界上向量
         min_baseline_m,                // 最小基线（米）
-        mask_path
+        mask_path, 
+        sample_fps
     );
   }
 

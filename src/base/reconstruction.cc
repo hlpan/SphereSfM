@@ -1656,8 +1656,24 @@ void Reconstruction::ExportPerspectiveCubic(
   cubic_reconstruction.Write(sparse_path);
 }
 
+std::vector<image_t> Reconstruction::GetSortedImages() {
+  // 拷贝一份，保持 reg_image_ids_ 原顺序与内容不变
+  std::vector<image_t> ids = reg_image_ids_;
 
-// -------- 主函数：导出整流后的双目针孔图像 --------
+  // 按文件名升序排序；同名时按 id 升序保证确定性
+  std::sort(ids.begin(), ids.end(), [this](const image_t a, const image_t b) {
+    const class Image& ia = this->Image(a);
+    const class Image& ib = this->Image(b);
+    const std::string& na = ia.Name();
+    const std::string& nb = ib.Name();
+    const int cmp = na.compare(nb);
+    if (cmp != 0) return cmp < 0;
+    return a < b;
+  });
+
+  return ids;  // 返回新数组
+}
+    // -------- 主函数：导出整流后的双目针孔图像 --------
 void Reconstruction::ExportStereoPairs(
     const std::string& out_path,     // 输出根目录
     const std::string& image_path,   // ERP原图所在目录（与 images.txt 一致）
@@ -1669,8 +1685,9 @@ void Reconstruction::ExportStereoPairs(
         ring_degrees,                 // 环角集合，建议 {0,60,120,180,240,300}
     const Eigen::Vector3d& world_up,  // 世界“上”向量（无IMU可用 [0,1,0]）
     const double min_baseline_m,       // 过短基线的剔除阈值（米）
-    const std::string& erp_mask_dir   // <--- 新增：ERP mask 目录；为空则不导出mask
-) const {
+    const std::string& erp_mask_dir,   // <--- 新增：ERP mask 目录；为空则不导出mask
+    const double frame_per_second  // 采样视频时的帧率（默认30）
+) {
   using namespace colmap;
   Reconstruction left_reconstruction;
 
@@ -1726,9 +1743,62 @@ void Reconstruction::ExportStereoPairs(
     double phi_deg = std::numeric_limits<double>::quiet_NaN();
   };
 
-  for (int i = 0; i + baseline_interval < N; i+= image_interval) {
+  // 统计摄像机移动的距离，结合视频总时间，再根据一个先验步行速度，最后估计出尺度因子
+  double human_speed_m_per_s = 1.0;  // 假设的平均步行速度
+  std::vector<double> length_two_frames;  // 记录每两帧间的距离，最后算个中位数
+  for (int i = 0; i + 1 < N; i += 1) {
     const image_t id1 = reg_image_ids_[i];
-    const image_t id2 = reg_image_ids_[i + baseline_interval];
+    const image_t id2 = reg_image_ids_[i + 1];
+    const class Image& img1 = Image(id1);
+    const class Image& img2 = Image(id2);
+    const Eigen::Vector3d C1 = img1.ProjectionCenter();
+    const Eigen::Vector3d C2 = img2.ProjectionCenter();
+    length_two_frames.push_back((C2 - C1).norm());
+  }
+  // 取中位数，避免偶尔的跳动影响
+  std::sort(length_two_frames.begin(), length_two_frames.end());
+  double estimated_scale = 1.0;
+  const double median_frame_interval_len = length_two_frames[length_two_frames.size() / 2];
+  const double camera_speed_m_per_s = median_frame_interval_len * frame_per_second;
+  std::cout << StringPrintf("Approx camera moving speed: %.3f m/s", camera_speed_m_per_s) << std::endl;
+  estimated_scale = human_speed_m_per_s / camera_speed_m_per_s;
+ 
+ 
+  std::cout << StringPrintf("Estimated scale: %.3f m/unit", estimated_scale)
+            << std::endl;
+  // 将estimated_scale应用于Reconstruction数据结构
+  const double s = estimated_scale;  // meters / unit
+  if (std::isfinite(s) && s > 0 ) {
+    // 1) 缩放所有已注册图像的平移向量（world->cam 的 tvec）
+    for (const image_t img_id : reg_image_ids_) {
+      class Image& img = Image(img_id);
+      Eigen::Vector3d t = img.Tvec();
+      img.SetTvec(
+          s * t);  // R 不变；保持 x = R*X + t 形式一致（X、C 都等比时投影不变）
+    }
+
+    // 2) 缩放所有三维点
+    for (const point3D_t pid : Point3DIds()) {
+      class Point3D& p3d = Point3D(pid);
+      Eigen::Vector3d X = p3d.XYZ();
+      p3d.SetXYZ(s * X);
+    }
+
+    // 可选：如果你维护了任何“先验/缓存的相机中心或平移”，在这里一并乘 s。
+    std::cout << StringPrintf("[Scale] Applied global scale s = %.6f (m/unit)",
+                              s)
+              << std::endl;
+  } else {
+    std::cout
+        << "[Scale] Skip applying scale (invalid or degenerate path length)."
+        << std::endl;
+  }
+
+  auto sorted_reg_image_ids = GetSortedImages(); 
+  for (int i = 0; i + baseline_interval < N; i+= image_interval) {
+
+    const image_t id1 = sorted_reg_image_ids[i];
+    const image_t id2 = sorted_reg_image_ids[i + baseline_interval];
 
     const class Image& img1 = Image(id1);
     const class Image& img2 = Image(id2);
@@ -1758,8 +1828,12 @@ void Reconstruction::ExportStereoPairs(
     const Eigen::Vector3d C1 = img1.ProjectionCenter();
     const Eigen::Vector3d C2 = img2.ProjectionCenter();
     const double B = (C2 - C1).norm();
-    if (B < std::max(1e-6, min_baseline_m)) {
+    const double max_baseline_m =3*baseline_interval*median_frame_interval_len*estimated_scale;  // 过长基线也跳过（避免误匹配）
+    if (B < std::max(1e-6, min_baseline_m) || B > max_baseline_m) {
       LOG(INFO) << StringPrintf("Skip pair %d-%d: short baseline %.3f m", id1, id2, B);
+      std::cout << StringPrintf("Skip pair %d-%d: baseline %.3f m not in [%.3f, %.3f]",
+                       id1, id2, B, min_baseline_m, max_baseline_m)
+                << std::endl;
       continue;
     }
 
