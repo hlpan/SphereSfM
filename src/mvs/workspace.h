@@ -69,11 +69,13 @@ class Workspace {
   virtual ~Workspace() = default;
 
   // Do nothing when we use a cache. Data is loaded as needed.
-  virtual void Load(const std::vector<std::string>& image_names);
+  virtual void Load(const std::vector<std::string>& image_names,
+                    bool sort_by_name = false);
 
   inline const Options& GetOptions() const { return options_; }
 
   inline const Model& GetModel() const { return model_; }
+  inline void SortImageByName() { model_.SortImagesByName(); }
 
   virtual const Bitmap& GetBitmap(const int image_idx);
   virtual const DepthMap& GetDepthMap(const int image_idx);
@@ -107,7 +109,7 @@ class CachedWorkspace : public Workspace {
  public:
   CachedWorkspace(const Options& options);
 
-  void Load(const std::vector<std::string>& image_names) override {}
+  void Load(const std::vector<std::string>& image_names, bool sort_by_name = false) override {}
 
   inline void ClearCache() { cache_.Clear(); }
 

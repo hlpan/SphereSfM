@@ -67,6 +67,8 @@ struct Model {
   int GetImageIdx(const std::string& name) const;
   std::string GetImageName(const int image_idx) const;
 
+  std::vector<std::vector<int>> GetMaxOverlappingImagesSimpleSLAM(
+      const size_t num_images, const std::string& angle_name) const;
   // For each image, determine the maximally overlapping images, sorted based on
   // the number of shared points subject to a minimum robust average
   // triangulation angle of the points.
@@ -86,6 +88,7 @@ struct Model {
   std::vector<std::map<int, float>> ComputeTriangulationAngles(
       const float percentile = 50) const;
 
+  void SortImagesByName();
   // Note that in case the data is read from a COLMAP reconstruction, the index
   // of an image or point does not correspond to its original identifier in the
   // reconstruction, but it corresponds to the position in the

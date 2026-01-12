@@ -116,6 +116,56 @@ std::string Model::GetImageName(const int image_idx) const {
   return image_names_.at(image_idx);
 }
 
+std::vector<std::vector<int>> Model::GetMaxOverlappingImagesSimpleSLAM(
+    const size_t num_images, const std::string& angle_name) const {
+
+  const size_t N = images.size();  // 按你的成员名修改
+  std::vector<std::vector<int>> overlapping_images(N);
+  if (N == 0 || num_images == 0) return overlapping_images;
+
+  // 1) 收集父目录名 == angle_name 的全局索引，形成子序列 ring_indices
+  std::vector<size_t> ring_indices;
+  ring_indices.reserve(N);
+
+  // 反查表：全局索引 -> 在 ring_indices 中的位置；不存在则为 max
+  std::vector<size_t> pos_in_ring(N, std::numeric_limits<size_t>::max());
+
+  for (size_t i = 0; i < N; ++i) {
+    // 用你自己的路径获取方式替换：
+    if (GetPathBaseName(GetParentDir(images[i].GetPath())) == angle_name) {
+      pos_in_ring[i] = ring_indices.size();
+      ring_indices.push_back(i);
+    }
+  }
+
+  const size_t R = ring_indices.size();
+  if (R <= 1) return overlapping_images;  // 只有0/1张，无可选邻居
+
+  // 2) 在子序列内做对称窗口选取（窗口内包含自身）
+  const size_t W = std::min(num_images + 1, R);
+
+  for (size_t gi = 0; gi < N; ++gi) {
+    const size_t pos = pos_in_ring[gi];
+    if (pos == std::numeric_limits<size_t>::max()) {
+      // 不属于该 angle_name，保持空列表
+      continue;
+    }
+
+    // 以 pos 为中心的窗口
+    size_t start = (pos > W / 2) ? (pos - W / 2) : 0;
+    if (start + W > R) start = R - W;
+
+    auto& dst = overlapping_images[gi];
+    dst.reserve(W - 1);
+    for (size_t k = start; k < start + W; ++k) {
+      const size_t gj = ring_indices[k];
+      if (gj != gi) dst.push_back(static_cast<int>(gj));
+    }
+  }
+
+  return overlapping_images;
+}
+
 std::vector<std::vector<int>> Model::GetMaxOverlappingImages(
     const size_t num_images, const double min_triangulation_angle) const {
   std::vector<std::vector<int>> overlapping_images(images.size());
@@ -271,6 +321,28 @@ std::vector<std::map<int, float>> Model::ComputeTriangulationAngles(
   }
 
   return triangulation_angles;
+}
+
+void Model::SortImagesByName() {
+  std::vector<size_t> indices(images.size());
+  for (size_t i = 0; i < indices.size(); ++i) {
+    indices[i] = i;
+  }
+  std::sort(indices.begin(), indices.end(),
+            [this](const size_t idx1, const size_t idx2) {
+              return image_names_.at(idx1) < image_names_.at(idx2);
+            });
+  std::vector<Image> sorted_images(images.size());
+  std::vector<std::string> sorted_image_names(image_names_.size());
+  std::unordered_map<std::string, int> sorted_image_name_to_idx;
+  for (size_t i = 0; i < indices.size(); ++i) {
+    sorted_images[i] = images[indices[i]];
+    sorted_image_names[i] = image_names_[indices[i]];
+    sorted_image_name_to_idx.emplace(sorted_image_names[i], i);
+  }
+  images = std::move(sorted_images);
+  image_names_ = std::move(sorted_image_names);
+  image_name_to_idx_ = std::move(sorted_image_name_to_idx);
 }
 
 bool Model::ReadFromBundlerPMVS(const std::string& path) {

@@ -155,6 +155,7 @@ void StereoFusion::Run() {
     workspace_options.stereo_folder =
         StringPrintf("stereo-%s", pmvs_option_name_.c_str());
   }
+  workspace_options.stereo_folder = StringPrintf("fsnet");
 
   workspace_options.num_threads = options_.num_threads;
   workspace_options.max_image_size = options_.max_image_size;
@@ -171,7 +172,7 @@ void StereoFusion::Run() {
     workspace_ = std::make_unique<CachedWorkspace>(workspace_options);
   } else {
     workspace_ = std::make_unique<Workspace>(workspace_options);
-    workspace_->Load(image_names);
+    workspace_->Load(image_names, true);
     num_threads = GetEffectiveNumThreads(options_.num_threads);
   }
 
@@ -185,12 +186,18 @@ void StereoFusion::Run() {
   const auto& model = workspace_->GetModel();
 
   const double kMinTriangulationAngle = 0;
-  if (model.GetMaxOverlappingImagesFromPMVS().empty()) {
+  overlapping_images_ = model.GetMaxOverlappingImagesSimpleSLAM(options_.check_num_images, "phi_270");
+  /*if (model.GetMaxOverlappingImagesFromPMVS().empty()) {
     overlapping_images_ = model.GetMaxOverlappingImages(
         options_.check_num_images, kMinTriangulationAngle);
   } else {
     overlapping_images_ = model.GetMaxOverlappingImagesFromPMVS();
-  }
+  }*/
+
+  //std::cout << model.images[0].GetPath() << std::endl;
+
+  //for (const auto overlap : overlapping_images_[0])
+  //  std::cout << "\t" << model.images[overlap].GetPath() << std::endl;
 
   task_fused_points_.resize(num_threads);
   task_fused_points_visibility_.resize(num_threads);
@@ -257,7 +264,7 @@ void StereoFusion::Run() {
   // Using a row stride of 10 to avoid starting parallel processing in rows that
   // are too close to each other which may lead to duplicated work, since nearby
   // pixels are likely to get fused into the same point.
-  const int kRowStride = 10;
+  const int kRowStride = 1;
   auto ProcessImageRows = [&, this](const int row_start, const int height,
                                     const int width, const int image_idx,
                                     const Mat<char>& fused_pixel_mask) {
@@ -414,6 +421,7 @@ void StereoFusion::Fuse(const int thread_id, const int image_idx, const int row,
 
       // Depth error of reference depth with current depth.
       const float depth_error = std::abs((proj(2) - depth) / depth);
+      //std::cout << "depth_error:" << depth_error << ",";
       if (depth_error > options_.max_depth_error) {
         continue;
       }
@@ -436,12 +444,12 @@ void StereoFusion::Fuse(const int thread_id, const int image_idx, const int row,
                                                normal_map.Get(row, col, 2));
 
     // Check for consistent normal direction with reference normal.
-    if (traversal_depth > 0) {
+ /*   if (traversal_depth > 0) {
       const float cos_normal_error = fused_ref_normal.dot(normal);
       if (cos_normal_error < min_cos_normal_error_) {
         continue;
       }
-    }
+    }*/
 
     // Determine 3D location of current depth value.
     const Eigen::Vector3f xyz =
@@ -525,9 +533,9 @@ void StereoFusion::Fuse(const int thread_id, const int image_idx, const int row,
     fused_normal.y() = internal::Median(&fused_point_ny);
     fused_normal.z() = internal::Median(&fused_point_nz);
     const float fused_normal_norm = fused_normal.norm();
-    if (fused_normal_norm < std::numeric_limits<float>::epsilon()) {
+    /*if (fused_normal_norm < std::numeric_limits<float>::epsilon()) {
       return;
-    }
+    }*/
 
     fused_point.x = internal::Median(&fused_point_x);
     fused_point.y = internal::Median(&fused_point_y);

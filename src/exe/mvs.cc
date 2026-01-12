@@ -166,7 +166,8 @@ int RunStereoFuser(int argc, char** argv) {
   }
 
   StringToLower(&input_type);
-  if (input_type != "photometric" && input_type != "geometric") {
+  if (input_type != "photometric" && input_type != "geometric" &&
+      input_type != "fsnet") {
     std::cout << "ERROR: Invalid input type - supported values are "
                  "'photometric' and 'geometric'."
               << std::endl;

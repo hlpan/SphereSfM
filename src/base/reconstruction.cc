@@ -1686,8 +1686,9 @@ void Reconstruction::ExportStereoPairs(
     const Eigen::Vector3d& world_up,  // 世界“上”向量（无IMU可用 [0,1,0]）
     const double min_baseline_m,       // 过短基线的剔除阈值（米）
     const std::string& erp_mask_dir,   // <--- 新增：ERP mask 目录；为空则不导出mask
-    const double frame_per_second  // 采样视频时的帧率（默认30）
-) {
+    const double frame_per_second,  // 采样视频时的帧率（默认30）
+    const int start_id,
+    const int end_id) {
   using namespace colmap;
   Reconstruction left_reconstruction;
 
@@ -1698,21 +1699,20 @@ void Reconstruction::ExportStereoPairs(
 
   // ---- 目录 ----
   std::string base_path = EnsureTrailingSlash(StringReplace(out_path, "\\", "/"));
+  base_path = base_path + StringPrintf("baseline_%d", baseline_interval);
   CreateDirIfNotExists(base_path);
-  base_path = base_path + "stereo/";
-  CreateDirIfNotExists(base_path);
-  std::string interval_dir = base_path + StringPrintf("baseline_%d/", baseline_interval);
+  std::string interval_dir = base_path + "/images/";
   CreateDirIfNotExists(interval_dir);
-
+  auto sorted_reg_image_ids = GetSortedImages(); 
   // ---- 目标针孔相机（所有left视图共用）----
-  const int N = static_cast<int>(reg_image_ids_.size());
+  const int N = static_cast<int>(sorted_reg_image_ids.size());
   if (N <= baseline_interval) {
     std::cout << "ExportStereoPairs: not enough images.\n";
     return;
   }
 
   // 用第一台球面相机的尺寸决定默认输出
-  const image_t first_id = reg_image_ids_.front();
+  const image_t first_id = sorted_reg_image_ids.front();
   const class Camera& sph0 = Camera(Image(first_id).CameraId());
   int out_wh = image_size > 0 ? image_size : (sph0.Height() / 2);
   if (out_wh <= 0) out_wh = 512;
@@ -1728,12 +1728,10 @@ void Reconstruction::ExportStereoPairs(
 
   // 为避免 name 冲突：把相对路径写入 name，确保全局唯一
   auto MakeLeftRelName = [&](image_t id1, image_t id2, int phi_deg) {
-    return StringPrintf("baseline_%d/PAIR_%06d_%06d/phi_%03d/left.png",
-                        baseline_interval, (int)id1, (int)id2, phi_deg);
+    return StringPrintf("PAIR_%06d_%06d/phi_%03d/left.png", (int)id1, (int)id2, phi_deg);
   };
   auto MakeRightRelName = [&](image_t id1, image_t id2, int phi_deg) {
-    return StringPrintf("baseline_%d/PAIR_%06d_%06d/phi_%03d/right.png",
-                        baseline_interval, (int)id1, (int)id2, phi_deg);
+    return StringPrintf("PAIR_%06d_%06d/phi_%03d/right.png", (int)id1, (int)id2, phi_deg);
   };
 
   // ----- 先建好所有 left/right 视图并落盘（不做Point3D）-----
@@ -1747,8 +1745,8 @@ void Reconstruction::ExportStereoPairs(
   double human_speed_m_per_s = 1.0;  // 假设的平均步行速度
   std::vector<double> length_two_frames;  // 记录每两帧间的距离，最后算个中位数
   for (int i = 0; i + 1 < N; i += 1) {
-    const image_t id1 = reg_image_ids_[i];
-    const image_t id2 = reg_image_ids_[i + 1];
+    const image_t id1 = sorted_reg_image_ids[i];
+    const image_t id2 = sorted_reg_image_ids[i + 1];
     const class Image& img1 = Image(id1);
     const class Image& img2 = Image(id2);
     const Eigen::Vector3d C1 = img1.ProjectionCenter();
@@ -1759,6 +1757,9 @@ void Reconstruction::ExportStereoPairs(
   std::sort(length_two_frames.begin(), length_two_frames.end());
   double estimated_scale = 1.0;
   const double median_frame_interval_len = length_two_frames[length_two_frames.size() / 2];
+  std::cout << StringPrintf("Median camera movement per frame: %.3f units",
+                            median_frame_interval_len)
+            << std::endl;
   const double camera_speed_m_per_s = median_frame_interval_len * frame_per_second;
   std::cout << StringPrintf("Approx camera moving speed: %.3f m/s", camera_speed_m_per_s) << std::endl;
   estimated_scale = human_speed_m_per_s / camera_speed_m_per_s;
@@ -1770,7 +1771,7 @@ void Reconstruction::ExportStereoPairs(
   const double s = estimated_scale;  // meters / unit
   if (std::isfinite(s) && s > 0 ) {
     // 1) 缩放所有已注册图像的平移向量（world->cam 的 tvec）
-    for (const image_t img_id : reg_image_ids_) {
+    for (const image_t img_id : sorted_reg_image_ids) {
       class Image& img = Image(img_id);
       Eigen::Vector3d t = img.Tvec();
       img.SetTvec(
@@ -1793,10 +1794,11 @@ void Reconstruction::ExportStereoPairs(
         << "[Scale] Skip applying scale (invalid or degenerate path length)."
         << std::endl;
   }
+  
+  int output_start = (start_id > 0) ? start_id : 0;
+  int output_end = (end_id > 0) ? end_id : N;
 
-  auto sorted_reg_image_ids = GetSortedImages(); 
-  for (int i = 0; i + baseline_interval < N; i+= image_interval) {
-
+  for (int i = output_start; i + baseline_interval < output_end; i += image_interval) {
     const image_t id1 = sorted_reg_image_ids[i];
     const image_t id2 = sorted_reg_image_ids[i + baseline_interval];
 

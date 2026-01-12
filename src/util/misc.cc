@@ -277,6 +277,7 @@ std::vector<double> CSVToVector(const std::string& csv) {
 
 std::vector<std::string> ReadTextFileLines(const std::string& path) {
   std::ifstream file(path);
+
   CHECK(file.is_open()) << path;
 
   std::string line;

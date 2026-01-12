@@ -398,7 +398,9 @@ class Reconstruction {
     const Eigen::Vector3d& world_up,       // 世界“上”向量（无IMU可用 [0,1,0]）
     const double min_baseline_m,            // 过短基线的剔除阈值（米）
     const std::string& erp_mask_dir,   // <--- 新增：ERP mask 目录；为空则不导出mask
-    const double frame_per_second = 1 // 采样视频时的帧率（默认1fps）
+    const double frame_per_second = 1, // 采样视频时的帧率（默认1fps）
+    const int start_id = -1, 
+    const int end_id = -1
   );
   // Extract colors for 3D points of given image. Colors will be extracted
   // only for 3D points which are completely black.

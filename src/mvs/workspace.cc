@@ -59,12 +59,13 @@ std::string Workspace::GetFileName(const int image_idx) const {
                       options_.input_type.c_str());
 }
 
-void Workspace::Load(const std::vector<std::string>& image_names) {
+void Workspace::Load(const std::vector<std::string>& image_names, bool sort_by_name) {
   const size_t num_images = model_.images.size();
   bitmaps_.resize(num_images);
   depth_maps_.resize(num_images);
   normal_maps_.resize(num_images);
 
+  if (sort_by_name) model_.SortImagesByName();
   auto LoadWorkspaceData = [&, this](const int image_idx) {
     const size_t width = model_.images.at(image_idx).GetWidth();
     const size_t height = model_.images.at(image_idx).GetHeight();

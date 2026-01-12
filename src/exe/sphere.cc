@@ -71,6 +71,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
   std::string mask_path = "";
   // 采样时的fps
   double sample_fps = 10.0;
+  int start_id = -1;
+  int end_id = -1;
   OptionManager options;
   options.AddImageOptions();  // 提供 --image_path
   options.AddRequiredOption("input_path", &input_path);
@@ -84,6 +86,8 @@ int RunSphereStereoExporter(int argc, char** argv) {
   options.AddDefaultOption("min_baseline_m", &min_baseline_m);
   options.AddDefaultOption("mask_path", &mask_path);
   options.AddDefaultOption("sample_fps", &sample_fps);
+  options.AddDefaultOption("start_id", &start_id);
+  options.AddDefaultOption("end_id", &end_id);
   options.Parse(argc, argv);
 
   CreateDirIfNotExists(output_path);
@@ -117,7 +121,9 @@ int RunSphereStereoExporter(int argc, char** argv) {
         up,                           // 世界上向量
         min_baseline_m,                // 最小基线（米）
         mask_path, 
-        sample_fps
+        sample_fps, 
+        start_id,
+        end_id
     );
   }
 
